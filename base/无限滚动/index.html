@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一次性渲染大数据列表</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.27/vue.global.min.js" integrity="sha512-jDpwxJN+g4BhXLdba5Z1rn2MpR9L5Wp3WVf2dJt5A0mkPHnHLZHZerpyX4JC9bM0pkCL7RmAR8FwOm02h7RKFg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js" integrity="sha512-WFN04846sdKMIP5LKNphMaWzU7YpMyCU245etK3g/2ARYbPK9Ub18eG+ljU96qKRCWh+quCY7yefSmlkQw1ANQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <style>
+        *{
+            margin: 0;
+            padding: 0;
+        }
+        body {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+        }
+        .v-scroll{
+            width: 300px;
+            height: 400px;
+            border: 1px solid rgba(0, 0, 0, 0.05);
+            overflow-y: scroll;
+            border-radius: 8px;
+        }
+        li{
+            list-style: none;
+            padding-left: 20px;
+            height: 40px;
+            line-height: 40px;
+            box-sizing: border-box;
+        }
+        li:nth-child(odd) {
+          background-color: #fff;
+        }
+        li:nth-child(even) {
+          box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.05);
+        }
+        .tip {
+          color:#666;
+          font-size: 13px;
+          text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+      <h2><span style="color: red;">固定数据</span>，行高固定</h2>
+      <h2>虚拟列表，无限滚动</h2>
+      <br/>
+      <!-- 处理滚动事件的容器，通过ref进行Vue实例中的引用 -->
+      <div class="v-scroll" @scroll="doScroll" ref="scrollBox">
+        <!-- 动态展示列表项的ul元素，其高度被设置为100%以填充父容器 -->
+        <ul :style="blankStyle" style="height: 100%">
+            <!-- 使用v-for指令根据currentList数据生成列表项 -->
+            <li v-for="item in currentList" :key="item.id">
+                {{ item }}
+            </li>
+        </ul>
+      </div>
+      <br/>
+      <div class="tip">共 {{allList.length}} 项，已渲染 {{currentList.length}} 项</div>
+    </div>
+
+    <script>
+      // 虚拟列表，我真的会了！！！
+      // https://juejin.cn/post/7085941958228574215#heading-11
+
+      // 一文教你读懂长数据列表虚拟滚动如何实现！
+      // https://juejin.cn/post/7309687967064113204#heading-9
+
+      // IntersectionObserver：实现滚动动画、懒加载、虚拟列表.
+      // https://juejin.cn/post/7296058491289501696#heading-13
+
+        const { createApp, ref, onMounted, computed} = Vue
+        
+        createApp({
+            /* 设置组件的初始状态和逻辑 */
+            setup() {
+                const allList = ref([]) // 所有数据的引用
+
+                /* 用于获取所有列表项数据的方法，模拟接口请求 */
+                const getAllList = (count) => { 
+                    for (let i = 0; i < count; i++) {
+                        allList.value.push(`我是列表${allList.value.length + 1}项`)
+                    }
+                }
+                getAllList(400) // 初始化时获取400项数据
+
+                const scrollBox = ref(null) // 滚动框的引用
+                const boxHeight = ref(0) // 滚动框的高度
+
+                /* 计算滚动框的高度 */
+                function getScrollBoxHeight() {
+                    boxHeight.value = scrollBox.value.offsetHeight
+                }
+
+                /* 组件挂载后执行的逻辑，包括初始化滚动框高度和监听窗口大小变化 */
+                onMounted(() => {
+                  getScrollBoxHeight();
+                  window.onresize = getScrollBoxHeight;
+                  window.onorientationchange = getScrollBoxHeight;
+                })
+
+                const itemHeight  =ref(40); // 列表项的高度
+
+                /* 计算当前应该渲染的列表项数量 */
+                // 项目数量 = 容器内容高度/列表项高度（向下取整+2, 因为可能多出一个列表项的一部分）
+                const itemNum = computed(() => {
+                  return ~~(boxHeight.value / itemHeight.value) + 2;
+                })
+
+                const startIndex = ref(0); // 当前渲染列表的起始索引
+
+                /*
+                 * 滚动事件处理函数，使用_.throttle防抖以降低函数调用频率
+                 * 根据滚动位置计算并更新起始渲染索引
+                 * 起始索引：已滚动高度 / 项目高度 = 当前渲染起始索引（向下取整）
+                 */
+                const doScroll = _.throttle(() => {
+                  const index = ~~(scrollBox.value.scrollTop / itemHeight.value);
+                  if(index === startIndex.value) return;
+                  startIndex.value = index;
+                }, 200)
+
+                /* 计算当前渲染列表的结束索引 
+                 * 结束索引：起始索引 + 项目数量 * 2 (渲染2倍可视区域的数据以提高用户体验，慢速滚动里不容易漏白)
+                 */
+                const endIndex = computed(() => {
+                  let index = startIndex.value + itemNum.value * 2;
+                  // 如果结束索引超出列表长度，则取列表最后一项索引
+                  if(!allList.value[index]){
+                    index = allList.value.length - 1;
+                  }
+                  return index;
+                })
+
+                const dataStartIndex = computed(() => {
+                  let index = 0;
+                  // 如果开始索引 <= 最大可见数量，则重置为 0
+                  if(startIndex.value <= itemNum.value){
+                    index = 0;
+                  }else{
+                    // 否则，数据列表索引 = 开始索引 - 最大可见数量 (滚动超过一屏时，数据列表索引需要减去一屏的数量)
+                    index = startIndex.value - itemNum.value;
+                  }
+                })
+
+                /* 根据起始和结束索引计算当前应渲染的列表数据 */
+                const currentList = computed(() => {
+                  let index = 0;
+                  // 如果开始索引 <= 最大可见数量，则重置为 0
+                  if(startIndex.value <= itemNum.value){
+                    index = 0;
+                  }else{
+                    // 否则，数据列表索引 = 开始索引 - 最大可见数量 (滚动超过一屏时，数据列表索引需要减去一屏的数量)
+                    index = startIndex.value - itemNum.value;
+                  }
+                  // 取出数据列表中，从索引开始到索引结束的数据
+                  return allList.value.slice(index, endIndex.value + 1)
+                })
+
+                /* 计算列表的空白区域样式，用于顶部和底部留白 */
+                /**
+                 * 列表内容高度 = 列表底部留白高度 + 列表高度（已渲染的数据项） + 列表顶部留白高度
+                 * 列表底部留白高度 = 列表头部未渲染的数据项总高度
+                 * 列表顶部留白高度 = 列表尾部未渲染的数据项总高度
+                 */
+                const blankStyle = computed(() => {
+                  let index = 0;
+                  // 如果开始索引 <= 最大可见数量，则重置为 0
+                  if(startIndex.value <= itemNum.value){
+                    index = 0;
+                  }else{
+                    // 否则，数据列表索引 = 开始索引 - 最大可见数量 (滚动超过一屏时，数据列表索引需要减去一屏的数量)
+                    index = startIndex.value - itemNum.value;
+                  }
+                  return {
+                    paddingTop: index * itemHeight.value + 'px',
+                    paddingBottom: (allList.value.length - 1 - endIndex.value) * itemHeight.value + 'px'
+                  }
+                })
+
+                /* 返回组件中使用到的所有响应式数据和方法 */
+                return {
+                  allList,
+                    currentList,
+                    boxHeight,
+                    itemHeight,
+                    scrollBox,
+                    doScroll,
+                    blankStyle
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>

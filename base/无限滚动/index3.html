@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>项目高度不固定，列表数据分页加载</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.27/vue.global.min.js"
+    integrity="sha512-jDpwxJN+g4BhXLdba5Z1rn2MpR9L5Wp3WVf2dJt5A0mkPHnHLZHZerpyX4JC9bM0pkCL7RmAR8FwOm02h7RKFg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"
+    integrity="sha512-WFN04846sdKMIP5LKNphMaWzU7YpMyCU245etK3g/2ARYbPK9Ub18eG+ljU96qKRCWh+quCY7yefSmlkQw1ANQ=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Mock.js/1.0.0/mock-min.js"
+    integrity="sha512-SAFE4gAN0AsQ0V99IS1p+Xbqk01HRjiPvtv0dbMxqN5G2f2OL7FvlrOxCaMpJXFOaqk7RaCLVFaYc3PKGLSc0Q=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.8/axios.min.js"
+    integrity="sha512-PJa3oQSLWRB7wHZ7GQ/g+qyv6r4mbuhmiDb8BjSFZ8NZ2a42oTtAq5n0ucWAwcQDlikAtkub+tPVCw4np27WCg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    .v-scroll {
+      width: 100%;
+      height: 70vh;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      overflow-y: scroll;
+      border-radius: 8px;
+    }
+
+    li {
+      list-style: none;
+      padding: 16px;
+      line-height: 2;
+      box-sizing: border-box;
+    }
+
+    li:nth-child(odd) {
+      background-color: #fff;
+    }
+
+    li:nth-child(even) {
+      box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.05);
+    }
+
+    .tip {
+      color: #666;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    @media (min-width: 768px) {
+      .v-scroll {
+        max-width: 750px;
+        /* 设置最大宽度为750px */
+        width: auto;
+        /* 如果屏幕宽度大于750px，网页宽度将不会超过750px */
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <!-- 处理滚动事件的容器，通过ref进行Vue实例中的引用 -->
+    <div>
+      <h2 style="color: red;">分页加载，动态行高</h2>
+      <h2>虚拟列表，无限滚动</h2>
+      <br />
+      <div class="v-scroll" @scroll="doScroll" ref="scrollBox">
+        <!-- 动态展示列表项的ul元素，其高度被设置为100%以填充父容器 -->
+        <ul :style="blankStyle" ref="listBox">
+          <!-- 使用v-for指令根据currentList数据生成列表项 -->
+          <li v-for="(item, index) in currentList" :key="item.id" :data-id="item.index">
+            ({{item.index}}) - {{item.id}} - {{ item.title }}
+            <img :src="item.img" />
+          </li>
+        </ul>
+      </div>
+      <br />
+      <div class="tip">共加载 {{allList.length}} 项，已渲染 {{currentList.length}} 项, 已加载 {{currentPage}} 页数据</div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted, watch, computed, nextTick } = Vue
+
+    Mock.mock('/api/data', 'get', {
+      'more': true,
+      'list|20': [{
+        'id|+1': 1,
+        'email': '@EMAIL',
+        'name': '@CNAME',
+        'title': '@PARAGRAPH'
+      }]
+    })
+    Mock.setup({ timeout: '600-1500' })
+
+    function getRandomInt(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    /**
+     * 实现二分查找算法，用于在经过排序且具有特定位置映射的列表中查找元素。
+     * @param {Array} list - 经过排序的列表，每个元素应包含一个可比较的index。
+     * @param {number} scrollTop - 需要查找的目标位置值。
+     * @param {Map} positionMap - 一个映射，将列表元素的index映射到其在滚动容器中的bottom位置。
+     * @returns {number} - 返回目标元素在列表中的索引；如果不存在，则返回最接近的目标索引。
+     */
+    const binarySearch = (list, scrollTop, positionMap) => {
+      // 初始化二分查找的边界
+      let left = 0;
+      let right = list.length - 1;
+      // 初始化模板索引，用于记录当前查找区间内最接近的目标索引
+      let templateIndex = -1;
+
+      while (left < right) { // 当左边界小于右边界时继续循环
+        const midIndex = Math.floor((left + right) / 2); // 计算中间位置的索引
+        const midValue = positionMap.get(list[midIndex].index).bottom; // 获取中间位置元素的底部位置值
+        // 如果中间位置的值等于目标值，则返回中间位置的索引加一
+        if (midValue === scrollTop) return midIndex + 1;
+        // 如果中间位置的值小于目标值，则更新左边界为中间位置的索引加一
+        else if (midValue < scrollTop) left = midIndex + 1;
+        // 如果中间位置的值大于目标值，更新右边界为中间位置的索引，并检查是否需要更新模板索引
+        else if (midValue > scrollTop) {
+          if (templateIndex === -1 || templateIndex > midIndex) templateIndex = midIndex;
+          right = midIndex;
+        }
+      }
+      // 如果未找到确切匹配项，返回模板索引
+      return templateIndex;
+    };
+
+    /**
+     * 虚拟列表: 始终只渲染可视区域两屏左右的数据
+     *  1. 给一个预估高度 = 接近数据项最小高度
+     *  2. 根据预估高度，计算出要显示的数据项个数
+     *  3. 渲染出数据项
+     *  4. 渲染完成后，计算每条数据项的实际高度（或使用 observer 监听列表高度变化，计算项目实际高度）
+     *  5. 根据已渲染的数据项实际高度和未渲染的数据项个数，计算 上下padding 的大小
+     *  6. 监听 scroll 事件，滚动到指定位置，计算出当前滚动到第几条数据
+     * 
+     **/
+
+    createApp({
+      /* 设置组件的初始状态和逻辑 */
+      setup() {
+        const listBox = ref();
+        const itemPositionMap = new Map();
+        const isReady = ref(false);
+        // 所有已加载的数据
+        const allList = ref([]) // 所有数据的引用
+        // 预估高度
+        const initItemHeight = ref(300);
+        // 最多一屏可显示的数据数
+        const initItemShowNum = ref(0);
+        // 列表项的高度
+        const itemHeight = ref(40);
+        // 加载状态
+        const isLoading = ref(false);
+        // 当前页码
+        const currentPage = ref(1);
+        // 是否还有更多
+        const hasMore = ref(false);
+        // 当前渲染列表的起始索引
+        const startIndex = ref(0);
+        // 当前列表的高度（可能会因为内容的加载导致变化）
+        const showListHeight = ref(0);
+        // 滚动容器的引用
+        const scrollBox = ref(null)
+        // 滚动容器的高度
+        const scrollBoxHeight = ref(0)
+
+
+        /* 用于获取所有列表项数据的方法，模拟接口请求 */
+        async function loadList() {
+          if (isLoading.value) return;
+          isLoading.value = true
+
+          const { list, more } = await axios.get('/api/data').then(v => v.data)
+
+          // 标记 index，初始化位置
+          list.forEach((v, i) => {
+            const index = allList.value.length + i;
+            v.index = index;
+            // 添加图片，模拟网络加载图片，项目高度变化的情况
+            v.img = `https://via.placeholder.com/${getRandomInt(50, 200)}x${getRandomInt(100, 300)}/999999/ff4400.png&text=EXAMPLE`
+            itemPositionMap.set(index, {
+              height: initItemHeight.value,
+              top: index === 0 ? 0 : itemPositionMap.get(index - 1).bottom,
+              bottom: index === 0 ? initItemHeight.value : itemPositionMap.get(index - 1).bottom + initItemHeight.value
+            })
+          });
+          allList.value = [...allList.value, ...list]
+          isLoading.value = false;
+          hasMore.value = more;
+          console.log(`加载第 ${currentPage.value} 页数据, 共 ${allList.value.length} 条数据`)
+          doScroll();
+        }
+
+        watch(currentPage, () => {
+          loadList();
+        })
+
+        /* 计算滚动框的高度 */
+        function getScrollBoxHeight() {
+          scrollBoxHeight.value = scrollBox.value.offsetHeight
+          initItemShowNum.value = Math.ceil(scrollBoxHeight.value / initItemHeight.value) + 1;
+        }
+
+        // 监听列表高度变化
+        function observerListHeight() {
+          showListHeight.value = listBox.value.offsetHeight;
+
+          const resizeObserverCallback = (entries) => {
+            entries.forEach(entry => {
+              const newHeight = entry.contentRect.height;
+              if (showListHeight.value !== newHeight) {
+                // console.log('The list height has changed!', newHeight);
+                setItemPositionMap();
+                isReady.value = true;
+              }
+              showListHeight.value = newHeight;
+            })
+          }
+
+          const observer = new ResizeObserver(resizeObserverCallback);
+          observer.observe(listBox.value);
+
+          return () => {
+            observer.unobserve(listBox.value);
+          }
+        }
+
+        // 缓存列表项目的位置和高度
+        // 列表高度变化，重新计算当前显示项目的高度
+        function setItemPositionMap() {
+          const elList = Array.from(listBox.value.children)
+          if (!elList.length) return;
+
+          // 计算显示项目的 真实高度
+          elList.forEach((el, i) => {
+            const item = currentList.value[i];
+            const offsetHeight = el.offsetHeight;
+            itemPositionMap.get(item.index).height = offsetHeight;
+          })
+
+          // 计算所有项目的 bottom 和 top
+          allList.value.forEach((v, i) => {
+            const prev = itemPositionMap.get(i - 1);
+            const curr = itemPositionMap.get(i)
+            curr.top = !prev ? 0 : prev.bottom
+            curr.bottom = !prev ? curr.height : (prev.bottom + prev.height)
+          })
+        }
+
+        const currentList = computed(() => {
+          return allList.value.slice(startIndex.value, endIndex.value + 1)
+        })
+
+        function setScrollBoxHeight() {
+          getScrollBoxHeight();
+          window.onresize = getScrollBoxHeight;
+          window.onorientationchange = getScrollBoxHeight;
+        }
+
+        /* 组件挂载后执行的逻辑，包括初始化滚动框高度和监听窗口大小变化 */
+        onMounted(async () => {
+          setScrollBoxHeight();
+          observerListHeight();
+          loadList();
+        })
+
+        function onScroll() {
+          if (!isReady.value) return;
+          // 当某项的 bottom 大于 一屏的高度时，计算startIndex
+          const scrollTop = scrollBox.value.scrollTop;
+
+          // 优化算法，二分查找，从小到大查找到第一个大于 scrollTop 的 index
+          // for (let i = 0; i < allList.value.length; i++) {
+          //   let index = allList.value[i].index;
+          //   // 如果当前项的 bottom 大于 scrollTop，则计算 startIndex
+          //   if (itemPositionMap.get(index).bottom >= scrollTop) {
+          //     console.log('for ---------------- ' + index)
+          //     console.log(index)
+          //     if (index <= initItemShowNum.value) {
+          //       index = 0;
+          //     }
+          //     if (index >= allList.value.length - initItemShowNum.value * 2) {
+          //       index = allList.value.length - initItemShowNum.value * 2;
+          //     }
+          //     startIndex.value = index;
+          //     console.log('startIndex = ' + index)
+          //     break;
+          //   }
+          // }
+          
+          // 二分查找法
+          let index = binarySearch(allList.value, scrollTop, itemPositionMap)
+          if (index <= initItemShowNum.value) {
+            index = 0;
+          }
+          if (index >= allList.value.length - initItemShowNum.value * 2) {
+            index = allList.value.length - initItemShowNum.value * 2;
+          }
+          startIndex.value = index;
+          // console.log('startIndex ---------- ' + index)
+        }
+
+        /*
+         * 滚动事件处理函数，使用_.throttle防抖以降低函数调用频率
+         */
+        const doScroll = _.throttle(() => window.requestAnimationFrame(onScroll), 30)
+
+        /* 计算当前渲染列表的结束索引  */
+        const endIndex = computed(() => {
+          if (!allList.value.length) return 0;
+
+          let index = startIndex.value + initItemShowNum.value * 2;
+          // 如果结束索引超出列表长度，则取列表最后一项索引
+          if (!allList.value[index]) {
+            index = allList.value.length - 1;
+          }
+          return index;
+        })
+
+        const isInBottom = computed(() => {
+          return allList.value.length - 1 === endIndex.value
+        })
+
+        // 监听是否滚动到底部，加载下一页数据
+        watch(isInBottom, (v) => {
+          if (v) {
+            console.log('加载更多')
+            // 加载中 或 没有更多了 都不再加载
+            if (isLoading.value || !hasMore.value) return;
+            // 页码加1，触发请求
+            currentPage.value++;
+          }
+        })
+
+        // 计算上下填充高度
+        const blankStyle = computed(() => {
+          console.log(startIndex.value, endIndex.value)
+          if (!itemPositionMap.get(startIndex.value)) return {}
+
+          return {
+            paddingTop: itemPositionMap.get(startIndex.value).top + 'px',
+            paddingBottom: itemPositionMap.get(allList.value.length - 1).bottom - itemPositionMap.get(endIndex.value).bottom + 'px'
+          }
+        })
+
+        return {
+          listBox,
+          allList,
+          currentList,
+          scrollBox,
+          doScroll,
+          blankStyle,
+          currentPage
+        }
+      }
+    }).mount('#app')
+  </script>
+</body>
+
+</html>
